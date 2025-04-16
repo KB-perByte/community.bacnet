@@ -3,7 +3,7 @@ from bacnet_collection.plugins.modules.bacnet_discover import discover_devices
 
 
 class InventoryModule(BaseInventoryPlugin):
-    NAME = "bacnet.bacnet_tools.bacnet_inventory"
+    NAME = "communit.bacnet.bacnet_inventory"
 
     def verify_file(self, path):
         return super().verify_file(path) and path.endswith("bacnet_inventory.yml")
