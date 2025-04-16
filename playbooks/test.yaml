@@ -1,0 +1,23 @@
+- name: Read temperature value
+  bacnet.bacnet_tools.bacnet_read:
+    device_address: '192.168.1.101:47808'
+    object_type: 'analog-input'
+    object_instance: 1
+    property_identifier: 'present-value'
+  register: temp_read
+
+- name: Discover BACnet devices
+  bacnet.bacnet_tools.bacnet_discover:
+    network_interface: 'eth0'
+    timeout: 20
+  register: discovered_devices
+
+- name: Set temperature setpoint
+  bacnet.bacnet_tools.bacnet_write:
+    device_address: '10.0.0.5:47808'
+    object_type: 'analog-output'
+    object_instance: 1
+    property_identifier: 'present-value'
+    value: 72.5
+    priority: 8
+    timeout: 15
