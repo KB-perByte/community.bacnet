@@ -1,405 +1,118 @@
-#!/usr/bin/env python3
-"""
-Standalone BACnet simulator for testing the Ansible collection
-"""
+import asyncio
+import datetime
+import BAC0
+from BAC0.core.devices.local.factory import binary_output, binary_value
 
-import time
-import random
-import threading
-import signal
-import sys
-import argparse
+bacnetDeviceId = 3056
+bacnetIp = "0.0.0.0/24"
 
-try:
-    import BAC0
-    from BAC0.core.devices.local.factory import (
-        analog_input,
-        analog_output,
-        analog_value,
-        binary_input,
-        binary_output,
-        binary_value,
-        multistate_value,
-    )
-except ImportError:
-    print("BAC0 library is required. Install with: pip install BAC0")
-    sys.exit(1)
+BAC0.log_level("silence")
 
 
-class HVACSimulator:
-    """
-    Simulates a complete HVAC system with realistic behavior
-    """
+class FanSystem:
+    def __init__(self):
+        self.lastFanStatus = False
 
-    def __init__(
-        self, device_id=100, device_name="HVAC Unit 1", ip="0.0.0.0", port=47808
-    ):
-        self.device_id = device_id
-        self.device_name = device_name
-        self.ip = ip
-        self.port = port
-        self.bacnet = None
-        self.device = None
-        self.running = False
-        self.simulation_thread = None
+    def update(self, switchValue, emergencyValue):
+        fanStatus = switchValue and not emergencyValue
+        changed = fanStatus != self.lastFanStatus
+        self.lastFanStatus = fanStatus
+        return changed, fanStatus
 
-        # Simulation variables
-        self.zone_temp = 72.0
-        self.outside_temp = 85.0
-        self.setpoint = 72.0
-        self.occupancy = True
-        self.fan_status = True
-        self.system_mode = 3  # Auto mode
-        self.damper_position = 50.0
-        self.valve_position = 25.0
 
-    def create_objects(self):
-        """Create BACnet objects for the HVAC system"""
-        return [
-            # Temperature Sensors
-            analog_input(
-                instance=1,
-                name="Zone Temperature",
-                properties={
-                    "presentValue": self.zone_temp,
-                    "units": "degreesFahrenheit",
-                    "description": "Zone air temperature sensor",
-                },
-            ),
-            analog_input(
-                instance=2,
-                name="Outside Air Temperature",
-                properties={
-                    "presentValue": self.outside_temp,
-                    "units": "degreesFahrenheit",
-                    "description": "Outside air temperature sensor",
-                },
-            ),
-            analog_input(
-                instance=3,
-                name="Supply Air Flow",
-                properties={
-                    "presentValue": 1200.0,
-                    "units": "cubicFeetPerMinute",
-                    "description": "Supply air flow measurement",
-                },
-            ),
-            analog_input(
-                instance=4,
-                name="Return Air Temperature",
-                properties={
-                    "presentValue": 75.0,
-                    "units": "degreesFahrenheit",
-                    "description": "Return air temperature",
-                },
-            ),
-            # Control Outputs
-            analog_output(
-                instance=1,
-                name="Damper Position",
-                properties={
-                    "presentValue": self.damper_position,
-                    "units": "percent",
-                    "description": "Outside air damper position",
-                },
-            ),
-            analog_output(
-                instance=2,
-                name="Chilled Water Valve",
-                properties={
-                    "presentValue": self.valve_position,
-                    "units": "percent",
-                    "description": "Chilled water valve position",
-                },
-            ),
-            analog_output(
-                instance=3,
-                name="Hot Water Valve",
-                properties={
-                    "presentValue": 0.0,
-                    "units": "percent",
-                    "description": "Hot water valve position",
-                },
-            ),
-            # Setpoints and Values
-            analog_value(
-                instance=1,
-                name="Zone Temperature Setpoint",
-                properties={
-                    "presentValue": self.setpoint,
-                    "units": "degreesFahrenheit",
-                    "description": "Zone temperature setpoint",
-                },
-            ),
-            analog_value(
-                instance=2,
-                name="Supply Air Flow Setpoint",
-                properties={
-                    "presentValue": 1200.0,
-                    "units": "cubicFeetPerMinute",
-                    "description": "Supply air flow setpoint",
-                },
-            ),
-            # Binary Status Points
-            binary_input(
-                instance=1,
-                name="Occupancy Sensor",
-                properties={
-                    "presentValue": "active" if self.occupancy else "inactive",
-                    "description": "Zone occupancy sensor",
-                },
-            ),
-            binary_input(
-                instance=2,
-                name="Filter Status",
-                properties={
-                    "presentValue": "inactive",
-                    "description": "Filter maintenance indicator",
-                },
-            ),
-            binary_input(
-                instance=3,
-                name="High Temperature Alarm",
-                properties={
-                    "presentValue": "inactive",
-                    "description": "High temperature alarm",
-                },
-            ),
-            # Binary Commands
-            binary_output(
-                instance=1,
-                name="Fan Command",
-                properties={
-                    "presentValue": "active" if self.fan_status else "inactive",
-                    "description": "Supply fan start/stop command",
-                },
-            ),
-            binary_output(
-                instance=2,
-                name="Heating Command",
-                properties={
-                    "presentValue": "inactive",
-                    "description": "Heating enable command",
-                },
-            ),
-            binary_output(
-                instance=3,
-                name="Cooling Command",
-                properties={
-                    "presentValue": "active",
-                    "description": "Cooling enable command",
-                },
-            ),
-            # Multi-state Objects
-            multistate_value(
-                instance=1,
-                name="System Mode",
-                properties={
-                    "presentValue": self.system_mode,
-                    "stateText": ["Off", "Heat", "Cool", "Auto", "Emergency Heat"],
-                    "description": "HVAC system operating mode",
-                },
-            ),
-            multistate_value(
-                instance=2,
-                name="Fan Mode",
-                properties={
-                    "presentValue": 2,
-                    "stateText": ["Off", "On", "Auto"],
-                    "description": "Fan operating mode",
-                },
-            ),
-        ]
+async def runBacnet():
+    try:
+        bacnet = BAC0.start(ip=bacnetIp, deviceId=bacnetDeviceId)
 
-    def start(self):
-        """Start the HVAC simulator"""
-        try:
-            print(f"Starting BACnet HVAC simulator...")
-            print(f"Device ID: {self.device_id}")
-            print(f"Device Name: {self.device_name}")
-            print(f"Network: {self.ip}:{self.port}")
+        bacnet.this_application.objectName = "FanController"
+        bacnet.this_application.vendorName = "BACnet Simulator"
+        bacnet.this_application.modelName = "FanControl-1000"
+        bacnet.this_application.firmwareRevision = "1.0.0"
 
-            # Initialize BACnet
-            self.bacnet = BAC0.lite(ip=self.ip, port=self.port)
+        fanStatus = binary_output(
+            name="FanStatus",
+            instance=1,
+            description="Fan operational state",
+            presentValue=False,
+            is_commandable=False,
+        )
 
-            # Create objects
-            objects = self.create_objects()
+        switchStatus = binary_value(
+            name="SwitchStatus",
+            instance=1,
+            description="Main control switch",
+            presentValue=False,
+            is_commandable=True,
+        )
 
-            # Create device
-            self.device = BAC0.device(
-                name=self.device_name,
-                deviceId=self.device_id,
-                bacnet=self.bacnet,
-                object_list=objects,
-            )
+        emergencyStop = binary_value(
+            name="EmergencyStop",
+            instance=2,
+            description="Emergency override button",
+            presentValue=False,
+            is_commandable=True,
+        )
 
-            print(f"Device created successfully!")
-            print(f"Objects created: {len(objects)}")
+        fanStatus.add_objects_to_application(bacnet)
+        switchStatus.add_objects_to_application(bacnet)
+        emergencyStop.add_objects_to_application(bacnet)
 
-            # Start simulation
-            self.running = True
-            self.simulation_thread = threading.Thread(target=self._simulate)
-            self.simulation_thread.daemon = True
-            self.simulation_thread.start()
+        fanStatusObj = fanStatus.objects["FanStatus"]
+        switchStatusObj = switchStatus.objects["SwitchStatus"]
+        emergencyStopObj = emergencyStop.objects["EmergencyStop"]
 
-            print("Simulation started. Press Ctrl+C to stop.")
-            return True
+        fanSystem = FanSystem()
 
-        except Exception as e:
-            print(f"Error starting simulator: {e}")
-            return False
+        print(f"BACnet device {bacnetDeviceId} ready at {bacnetIp}")
 
-    def stop(self):
-        """Stop the simulator"""
-        print("Stopping simulator...")
-        self.running = False
+        while True:
+            await asyncio.sleep(0.5)
 
-        if self.simulation_thread:
-            self.simulation_thread.join(timeout=2)
+            switchValue = switchStatusObj.presentValue
+            emergencyValue = emergencyStopObj.presentValue
 
-        if self.bacnet:
-            self.bacnet.disconnect()
+            changed, newFanStatus = fanSystem.update(switchValue, emergencyValue)
 
-        print("Simulator stopped.")
+            if changed:
+                fanStatusObj.presentValue = newFanStatus
+                print(f"Fan status changed to: {'ON' if newFanStatus else 'OFF'}")
 
-    def _simulate(self):
-        """Run the HVAC simulation"""
-        while self.running:
+            if int(datetime.datetime.now().timestamp()) % 5 == 0:
+                print(
+                    f"State: Fan={fanStatusObj.presentValue}, "
+                    f"Switch={switchStatusObj.presentValue}, "
+                    f"Emergency={emergencyStopObj.presentValue}"
+                )
+                await asyncio.sleep(0.1)
+
+    except asyncio.CancelledError:
+        print("BACnet server shutting down")
+    except Exception as e:
+        print(f"System error: {e}")
+        if "bacnet" in locals():
             try:
-                # Simulate temperature changes
-                self._update_temperatures()
-
-                # Update occupancy randomly
-                if random.random() < 0.1:  # 10% chance each cycle
-                    self.occupancy = not self.occupancy
-
-                # Update BACnet objects with new values
-                self._update_bacnet_objects()
-
-                time.sleep(5)  # Update every 5 seconds
-
-            except Exception as e:
-                print(f"Simulation error: {e}")
-                time.sleep(1)
-
-    def _update_temperatures(self):
-        """Simulate realistic temperature behavior"""
-        # Outside temperature varies throughout the day
-        self.outside_temp += random.uniform(-0.5, 0.5)
-        self.outside_temp = max(70, min(100, self.outside_temp))
-
-        # Zone temperature is influenced by outside temp, HVAC operation, and occupancy
-        temp_influence = 0
-
-        # Outside air influence (when damper is open)
-        if self.damper_position > 0:
-            temp_influence += (
-                (self.outside_temp - self.zone_temp)
-                * (self.damper_position / 100)
-                * 0.1
-            )
-
-        # Cooling influence
-        if self.valve_position > 0 and self.fan_status:
-            cooling_effect = self.valve_position / 100 * 2.0
-            if self.zone_temp > self.setpoint:
-                temp_influence -= cooling_effect
-
-        # Occupancy heat gain
-        if self.occupancy:
-            temp_influence += 0.2
-
-        # Random variations
-        temp_influence += random.uniform(-0.1, 0.1)
-
-        self.zone_temp += temp_influence
-        self.zone_temp = max(65, min(85, self.zone_temp))
-
-        # Simple control logic
-        temp_error = self.zone_temp - self.setpoint
-
-        if self.system_mode == 3:  # Auto mode
-            if temp_error > 1.0:  # Too hot
-                self.valve_position = min(100, self.valve_position + 5)
-                self.damper_position = max(10, min(50, self.damper_position))
-            elif temp_error < -1.0:  # Too cold
-                self.valve_position = max(0, self.valve_position - 5)
-                self.damper_position = max(0, self.damper_position - 5)
-
-    def _update_bacnet_objects(self):
-        """Update BACnet object values"""
-        if not self.device:
-            return
-
-        try:
-            # Update analog inputs
-            self.device["analogInput:1"].presentValue = round(self.zone_temp, 1)
-            self.device["analogInput:2"].presentValue = round(self.outside_temp, 1)
-            self.device["analogInput:3"].presentValue = round(
-                1200 + random.uniform(-50, 50), 1
-            )
-
-            # Update analog outputs
-            self.device["analogOutput:1"].presentValue = round(self.damper_position, 1)
-            self.device["analogOutput:2"].presentValue = round(self.valve_position, 1)
-
-            # Update binary inputs
-            self.device["binaryInput:1"].presentValue = (
-                "active" if self.occupancy else "inactive"
-            )
-
-            # Update alarms
-            high_temp_alarm = self.zone_temp > (self.setpoint + 5)
-            self.device["binaryInput:3"].presentValue = (
-                "active" if high_temp_alarm else "inactive"
-            )
-
-        except Exception as e:
-            print(f"Error updating objects: {e}")
-
-
-def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully"""
-    print("\nReceived interrupt signal...")
-    if "simulator" in globals():
-        simulator.stop()
-    sys.exit(0)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="BACnet HVAC Simulator")
-    parser.add_argument("--device-id", type=int, default=100, help="BACnet device ID")
-    parser.add_argument("--device-name", default="HVAC Unit 1", help="Device name")
-    parser.add_argument("--ip", default="0.0.0.0", help="IP address to bind to")
-    parser.add_argument("--port", type=int, default=47808, help="Port to bind to")
-
-    args = parser.parse_args()
-
-    # Set up signal handler
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Create and start simulator
-    global simulator
-    simulator = HVACSimulator(
-        device_id=args.device_id,
-        device_name=args.device_name,
-        ip=args.ip,
-        port=args.port,
-    )
-
-    if simulator.start():
-        try:
-            # Keep the main thread alive
-            while simulator.running:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            simulator.stop()
-    else:
-        print("Failed to start simulator")
-        sys.exit(1)
+                bacnet.disconnect()
+            except:
+                pass
 
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(runBacnet())
+    except KeyboardInterrupt:
+        print("User interrupted program execution")
+    finally:
+        pending = asyncio.all_tasks(loop)
+
+        for task in pending:
+            task.cancel()
+
+        try:
+            loop.run_until_complete(asyncio.sleep(0.1))
+        except:
+            pass
+
+        loop.close()
