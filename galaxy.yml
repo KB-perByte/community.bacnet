@@ -1,11 +1,12 @@
 namespace: community
 name: bacnet
 version: 1.0.0
-description: BACnet operations collection using bacpypes
+description: Ansible collection for BACnet protocol operations using BAC0
 license: MIT
 authors:
   - Sagar Paul (KB-perByte)
-dependencies: {}
+dependencies:
+  'ansible.posix': '>=1.0.0'
 repository: https://github.com/KB-perByte/community.bacnet
 documentation: https://github.com/KB-perByte/community.bacnet/README.md
 issues: https://github.com/KB-perByte/community.bacnet/issues

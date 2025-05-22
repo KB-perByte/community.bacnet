@@ -1,0 +1,11 @@
+---
+requires_ansible: '>=2.15.0'
+action_groups:
+  bacnet:
+    - bacnet_device_info
+    - bacnet_read_property
+    - bacnet_write_property
+    - bacnet_object_list
+    - bacnet_who_is
+    - bacnet_i_am
+    - bacnet_subscribe_cov

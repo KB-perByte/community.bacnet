@@ -1,0 +1,368 @@
+# File: playbooks/bacnet_discovery.yml
+---
+- name: BACnet Network Discovery and Monitoring
+  hosts: localhost
+  gather_facts: false
+  vars:
+    bacnet_network:
+      ip: "{{ ansible_default_ipv4.address | default('0.0.0.0') }}"
+      port: 47808
+      timeout: 30
+
+  tasks:
+    - name: Discover BACnet devices on network
+      community.bacnet.bacnet_device_info:
+        ip: "{{ bacnet_network.ip }}"
+        port: "{{ bacnet_network.port }}"
+        timeout: "{{ bacnet_network.timeout }}"
+      register: discovered_devices
+
+    - name: Display discovered devices
+      debug:
+        msg: |
+          Found {{ discovered_devices.device_count }} BACnet devices:
+          {% for device in discovered_devices.devices %}
+          - Device ID: {{ device.device_id }}
+            Name: {{ device.name }}
+            Address: {{ device.address }}
+            Vendor: {{ device.vendor }}
+          {% endfor %}
+
+    - name: Get detailed information for each device
+      community.bacnet.bacnet_object_list:
+        device_id: "{{ item.device_id }}"
+        address: "{{ item.address }}"
+      loop: "{{ discovered_devices.devices }}"
+      register: device_objects
+      when: discovered_devices.devices | length > 0
+
+    - name: Save device inventory
+      copy:
+        content: |
+          # BACnet Device Inventory
+          # Generated: {{ ansible_date_time.iso8601 }}
+
+          {% for device in discovered_devices.devices %}
+          ## Device: {{ device.name }} (ID: {{ device.device_id }})
+          - Address: {{ device.address }}
+          - Vendor: {{ device.vendor }}
+
+          {% endfor %}
+        dest: "./bacnet_inventory.md"
+      when: discovered_devices.devices | length > 0
+
+---
+# File: playbooks/bacnet_monitoring.yml
+---
+- name: BACnet Device Monitoring
+  hosts: localhost
+  gather_facts: false
+  vars:
+    monitoring_devices:
+      - device_id: 100
+        address: "192.168.1.100"
+        name: "HVAC Unit 1"
+      - device_id: 200
+        address: "192.168.1.200"
+        name: "VAV Box 1"
+
+    monitoring_points:
+      - object_type: "analogInput"
+        object_instance: 1
+        property: "presentValue"
+        description: "Zone Temperature"
+      - object_type: "analogInput"
+        object_instance: 2
+        property: "presentValue"
+        description: "Outside Air Temperature"
+      - object_type: "binaryInput"
+        object_instance: 1
+        property: "presentValue"
+        description: "Occupancy Status"
+
+  tasks:
+    - name: Read monitoring points from all devices
+      community.bacnet.bacnet_read_property:
+        device_id: "{{ device.device_id }}"
+        address: "{{ device.address }}"
+        object_type: "{{ point.object_type }}"
+        object_instance: "{{ point.object_instance }}"
+        property_name: "{{ point.property }}"
+      loop: "{{ monitoring_devices | product(monitoring_points) | list }}"
+      loop_control:
+        loop_var: item
+      vars:
+        device: "{{ item[0] }}"
+        point: "{{ item[1] }}"
+      register: monitoring_results
+      ignore_errors: true
+
+    - name: Process monitoring data
+      set_fact:
+        monitoring_data: |
+          {% set data = [] %}
+          {% for result in monitoring_results.results %}
+          {% if not result.failed %}
+          {% set _ = data.append({
+            'timestamp': ansible_date_time.iso8601,
+            'device_id': result.item[0].device_id,
+            'device_name': result.item[0].name,
+            'object_type': result.object_type,
+            'object_instance': result.object_instance,
+            'property': result.property_name,
+            'value': result.value,
+            'description': result.item[1].description
+          }) %}
+          {% endif %}
+          {% endfor %}
+          {{ data }}
+
+    - name: Save monitoring data to CSV
+      copy:
+        content: |
+          timestamp,device_id,device_name,object_type,object_instance,property,value,description
+          {% for entry in monitoring_data %}
+          {{ entry.timestamp }},{{ entry.device_id }},{{ entry.device_name }},{{ entry.object_type }},{{ entry.object_instance }},{{ entry.property }},{{ entry.value }},{{ entry.description }}
+          {% endfor %}
+        dest: "./bacnet_monitoring_{{ ansible_date_time.epoch }}.csv"
+
+    - name: Check for alarms
+      debug:
+        msg: "ALARM: High temperature detected on {{ item.device_name }}"
+      loop: "{{ monitoring_data }}"
+      when:
+        - item.description == "Zone Temperature"
+        - item.value | float > 80
+
+---
+# File: playbooks/bacnet_control.yml
+---
+- name: BACnet Device Control Operations
+  hosts: localhost
+  gather_facts: false
+  vars:
+    target_device:
+      device_id: 100
+      address: "192.168.1.100"
+      name: "HVAC Unit 1"
+
+    control_sequence:
+      - name: "Set temperature setpoint"
+        object_type: "analogValue"
+        object_instance: 1
+        property: "presentValue"
+        value: 72.0
+        priority: 8
+
+      - name: "Enable cooling"
+        object_type: "binaryOutput"
+        object_instance: 3
+        property: "presentValue"
+        value: "active"
+        priority: 8
+
+      - name: "Set damper position"
+        object_type: "analogOutput"
+        object_instance: 1
+        property: "presentValue"
+        value: 25.0
+        priority: 8
+
+  tasks:
+    - name: Read current values before changes
+      community.bacnet.bacnet_read_property:
+        device_id: "{{ target_device.device_id }}"
+        address: "{{ target_device.address }}"
+        object_type: "{{ item.object_type }}"
+        object_instance: "{{ item.object_instance }}"
+        property_name: "{{ item.property }}"
+      loop: "{{ control_sequence }}"
+      register: before_values
+
+    - name: Display current values
+      debug:
+        msg: "{{ item.item.name }}: Current value = {{ item.value }}"
+      loop: "{{ before_values.results }}"
+
+    - name: Apply control sequence
+      community.bacnet.bacnet_write_property:
+        device_id: "{{ target_device.device_id }}"
+        address: "{{ target_device.address }}"
+        object_type: "{{ item.object_type }}"
+        object_instance: "{{ item.object_instance }}"
+        property_name: "{{ item.property }}"
+        value: "{{ item.value }}"
+        priority: "{{ item.priority | default(omit) }}"
+      loop: "{{ control_sequence }}"
+      register: write_results
+
+    - name: Verify changes
+      community.bacnet.bacnet_read_property:
+        device_id: "{{ target_device.device_id }}"
+        address: "{{ target_device.address }}"
+        object_type: "{{ item.object_type }}"
+        object_instance: "{{ item.object_instance }}"
+        property_name: "{{ item.property }}"
+      loop: "{{ control_sequence }}"
+      register: after_values
+
+    - name: Display results
+      debug:
+        msg: |
+          {{ item.item.name }}:
+          - Before: {{ before_values.results[ansible_loop.index0].value }}
+          - After: {{ item.value }}
+          - Success: {{ write_results.results[ansible_loop.index0].success }}
+      loop: "{{ after_values.results }}"
+
+---
+# File: roles/bacnet_setup/tasks/main.yml
+---
+- name: Install Python dependencies
+  pip:
+    name:
+      - BAC0>=22.09.15
+      - ifaddr>=0.1.7
+      - netifaces>=0.11.0
+    state: present
+  become: true
+
+- name: Create BACnet configuration directory
+  file:
+    path: /etc/bacnet
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Template BACnet configuration
+  template:
+    src: bacnet.conf.j2
+    dest: /etc/bacnet/bacnet.conf
+    mode: '0644'
+  become: true
+  notify: restart bacnet service
+
+- name: Configure firewall for BACnet
+  ufw:
+    rule: allow
+    port: "{{ bacnet_port | default('47808') }}"
+    proto: udp
+  become: true
+  when: configure_firewall | default(true)
+
+---
+# File: roles/bacnet_setup/templates/bacnet.conf.j2
+# BACnet Configuration
+# Generated by Ansible
+
+[network]
+interface = {{ bacnet_interface | default('eth0') }}
+port = {{ bacnet_port | default(47808) }}
+{% if bacnet_bbmd_address is defined %}
+bbmd_address = {{ bacnet_bbmd_address }}
+bbmd_ttl = {{ bacnet_bbmd_ttl | default(30) }}
+{% endif %}
+
+[device]
+device_id = {{ bacnet_device_id | default(999999) }}
+device_name = {{ bacnet_device_name | default('Ansible BACnet Device') }}
+vendor_name = {{ bacnet_vendor_name | default('Ansible') }}
+
+[logging]
+level = {{ bacnet_log_level | default('INFO') }}
+file = {{ bacnet_log_file | default('/var/log/bacnet.log') }}
+
+---
+# File: roles/bacnet_simulator/tasks/main.yml
+---
+- name: Start BACnet test simulator
+  community.bacnet.bacnet_simulator:
+    state: started
+    device_id: "{{ simulator_device_id | default(999999) }}"
+    device_name: "{{ simulator_device_name | default('Test HVAC Unit') }}"
+    ip: "{{ simulator_ip | default('0.0.0.0') }}"
+    port: "{{ simulator_port | default(47808) }}"
+    objects: "{{ simulator_objects | default([]) }}"
+  register: simulator_result
+
+- name: Display simulator information
+  debug:
+    msg: |
+      BACnet Simulator Started:
+      - Device ID: {{ simulator_result.device_id }}
+      - Device Name: {{ simulator_result.device_name }}
+      - Address: {{ simulator_result.address }}
+      - Running: {{ simulator_result.running }}
+
+- name: Wait for simulator to be ready
+  pause:
+    seconds: 5
+    prompt: "Waiting for simulator to initialize..."
+
+---
+# File: test_collection.yml
+---
+- name: Test BACnet Collection
+  hosts: localhost
+  gather_facts: true
+  vars:
+    test_device_id: 999999
+    test_device_name: "Ansible Test Device"
+
+  tasks:
+    - name: Start test simulator
+      include_role:
+        name: community.bacnet.bacnet_simulator
+      vars:
+        simulator_device_id: "{{ test_device_id }}"
+        simulator_device_name: "{{ test_device_name }}"
+
+    - name: Discover the test device
+      community.bacnet.bacnet_device_info:
+        timeout: 10
+      register: discovery_result
+
+    - name: Verify test device is discovered
+      assert:
+        that:
+          - discovery_result.device_count >= 1
+          - discovery_result.devices | selectattr('device_id', 'equalto', test_device_id) | list | length == 1
+        fail_msg: "Test device not discovered"
+        success_msg: "Test device discovered successfully"
+
+    - name: Test reading properties
+      community.bacnet.bacnet_read_property:
+        device_id: "{{ test_device_id }}"
+        object_type: "analogInput"
+        object_instance: 1
+        property_name: "presentValue"
+      register: read_result
+
+    - name: Verify read operation
+      assert:
+        that:
+          - read_result.value is defined
+          - read_result.object_type == "analogInput"
+        fail_msg: "Read operation failed"
+        success_msg: "Read operation successful"
+
+    - name: Test writing properties
+      community.bacnet.bacnet_write_property:
+        device_id: "{{ test_device_id }}"
+        object_type: "analogOutput"
+        object_instance: 1
+        property_name: "presentValue"
+        value: 75.0
+        priority: 8
+      register: write_result
+
+    - name: Verify write operation
+      assert:
+        that:
+          - write_result.success
+        fail_msg: "Write operation failed"
+        success_msg: "Write operation successful"
+
+    - name: Clean up - stop simulator
+      community.bacnet.bacnet_simulator:
+        state: stopped
