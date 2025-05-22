@@ -9,7 +9,7 @@ from ansible.module_utils.basic import missing_required_lib
 
 try:
     import BAC0
-    from BAC0.core.devices.local.models import ObjectFactory
+    from BAC0.core.devices.local.factory import ObjectFactory
 
     HAS_BAC0 = True
 except ImportError:

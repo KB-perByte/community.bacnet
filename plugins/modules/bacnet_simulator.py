@@ -81,7 +81,7 @@ from ansible.module_utils.basic import AnsibleModule
 
 try:
     import BAC0
-    from BAC0.core.devices.local.models import (
+    from BAC0.core.devices.local.factory import (
         analog_input,
         analog_output,
         analog_value,
